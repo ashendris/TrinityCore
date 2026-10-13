@@ -83,11 +83,6 @@ function(trinity_add_module)
     "#pragma once\n#define TRINITY_MODULE_MANIFEST \"${manifest_cpp}\"\n")
   add_library(${target} SHARED ${M_SOURCES})
   target_link_libraries(${target} PRIVATE Trinity::SDK)
-  if(TARGET game)
-    # Modules call core exports; an interface-only dependency cannot supply them.
-    target_link_libraries(${target} PRIVATE game trinity-core-interface)
-  endif()
-  target_include_directories(${target} PRIVATE ${M_INCLUDE_DIRS})
   target_compile_definitions(${target} PRIVATE
     TRINITY_MODULE_SHARED
     TRINITY_MODULE_NAME="${M_NAME}"

@@ -29,9 +29,7 @@ target_link_libraries(game-interface
     shared
     mmaps_common)
 
-target_include_directories(game-interface
-  INTERFACE
-    ${CMAKE_BINARY_DIR}/sdk/generated/trinity)
+target_link_libraries(game-interface INTERFACE Trinity::SDK)
 
 add_library(game)
 
@@ -40,11 +38,12 @@ CollectAndAddSourceFiles(
   ${CMAKE_CURRENT_SOURCE_DIR}
   EXCLUDE
   ${CMAKE_CURRENT_SOURCE_DIR}/PrecompiledHeaders)
+target_sources(game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Modules/ModuleAdapters.cpp)
+target_sources(game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Modules/ModuleSpellAdapters.cpp)
+target_sources(game PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/Texts/ChatTextBuilder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/Movement/Waypoints/WaypointManager.cpp)
 
-target_include_directories(game
-  PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${CMAKE_BINARY_DIR}/sdk/generated/trinity)
 
 target_link_libraries(game
   PRIVATE

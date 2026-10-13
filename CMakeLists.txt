@@ -82,14 +82,8 @@ add_subdirectory(dep)
 
 # add core sources
 add_subdirectory(src)
+find_package(TrinitySDK CONFIG REQUIRED)
 
-# Installable SDK package is generated after the core targets exist.
-add_subdirectory(sdk)
-
-# Build in-tree modules after TrinitySDK and core targets exist.
-if(EXISTS "${CMAKE_SOURCE_DIR}/modules/CMakeLists.txt")
-  add_subdirectory(modules)
-endif()
 
 
 include(CTest)

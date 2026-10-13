@@ -31,7 +31,7 @@ class WorldObject;
 
 namespace Trinity
 {
-    class ChatPacketSender
+    class TC_GAME_API ChatPacketSender
     {
     private:
         // params
@@ -57,7 +57,7 @@ namespace Trinity
         void operator()(Player const* player) const;
     };
 
-    class BroadcastTextBuilder
+    class TC_GAME_API BroadcastTextBuilder
     {
         public:
             BroadcastTextBuilder(WorldObject const* obj, ChatMsg msgType, uint32 textId, uint8 gender, WorldObject const* target = nullptr, uint32 achievementId = 0)

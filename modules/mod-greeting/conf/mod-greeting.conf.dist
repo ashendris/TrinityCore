@@ -1,3 +1,0 @@
-[worldserver]
-# Prefix used by mod-greeting's startup and shutdown messages.
-Module.mod-greeting.Prefix = Hello

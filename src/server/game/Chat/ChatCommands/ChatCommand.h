@@ -144,6 +144,8 @@ namespace Trinity::Impl::ChatCommands
         template <typename TypedHandler>
         CommandInvoker(TypedHandler& handler) : _wrapper(&CommandInvokerTraits<TypedHandler>::Wrapper), _handler(reinterpret_cast<void*>(handler)) { }
         CommandInvoker(bool(&handler)(ChatHandler*, char const*)) : _wrapper(&LegacyWrapper), _handler(reinterpret_cast<void*>(handler)) { }
+        using ContextHandler = bool(*)(void*, ChatHandler*, std::string_view) noexcept;
+        CommandInvoker(ContextHandler handler, void* context) : _wrapper(handler), _handler(context) { }
 
         explicit operator bool() const { return (_wrapper != nullptr); }
         bool operator()(ChatHandler* chatHandler, std::string_view args) const
@@ -226,6 +228,10 @@ namespace Trinity::ChatCommands
                 : _invoker{ handler }, _help{ help }, _permissions{ permission, allowConsole }
             {}
 
+            InvokerEntry(Trinity::Impl::ChatCommands::CommandInvoker::ContextHandler handler, void* context, TrinityStrings help, rbac::RBACPermissions permission, Trinity::ChatCommands::Console allowConsole)
+                : _invoker{ handler, context }, _help{ help }, _permissions{ permission, allowConsole }
+            {}
+
             Trinity::Impl::ChatCommands::CommandInvoker _invoker;
             TrinityStrings _help;
             Trinity::Impl::ChatCommands::CommandPermissions _permissions;
@@ -240,6 +246,9 @@ namespace Trinity::ChatCommands
         template <typename TypedHandler>
         ChatCommandBuilder(std::string_view name, TypedHandler& handler, rbac::RBACPermissions permission, Trinity::ChatCommands::Console allowConsole)
             : ChatCommandBuilder(name, handler, TrinityStrings(), permission, allowConsole)
+        {}
+        ChatCommandBuilder(std::string_view name, Trinity::Impl::ChatCommands::CommandInvoker::ContextHandler handler, void* context, rbac::RBACPermissions permission, Trinity::ChatCommands::Console allowConsole)
+            : _name{ name }, _data{ InvokerEntry { handler, context, TrinityStrings(), permission, allowConsole } }
         {}
         ChatCommandBuilder(std::string_view name, std::span<ChatCommandBuilder const> subCommands)
             : _name{ name }, _data{ std::in_place_index<1>, subCommands.data(), subCommands.size() }

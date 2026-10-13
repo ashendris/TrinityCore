@@ -1620,6 +1620,12 @@ HotSwap.EnablePrefixCorrection = 1
 #                     "Release" - Release builds only
 #                     "Debug" - Debug builds only
 
+
+# Modules.TrustedKeyDirectory
+#     Directory containing trusted Ed25519 public keys. Each key is a `<key_id>.pub` file.
+#     Production module packages must contain signed manifest/resource metadata.
+#     Default: "keys"
+Modules.TrustedKeyDirectory = "keys"
 HotSwap.ReCompilerBuildType = ""
 
 #

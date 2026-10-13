@@ -353,8 +353,8 @@ int main(int argc, char** argv)
     auto scriptReloadMgrHandle = Trinity::make_unique_ptr_with_deleter<&ScriptReloadMgr::Unload>(sScriptReloadMgr);
     sScriptMgr->SetScriptLoader(AddScripts);
     sModuleMgr->Discover();
-    auto sModuleMgrHandle = Trinity::make_unique_ptr_with_deleter<&Trinity::ModuleMgr::Unload>(sModuleMgr);
     auto sScriptMgrHandle = Trinity::make_unique_ptr_with_deleter<&ScriptMgr::Unload>(sScriptMgr);
+    auto sModuleMgrHandle = Trinity::make_unique_ptr_with_deleter<&Trinity::ModuleMgr::Unload>(sModuleMgr);
 
     // Initialize the World
     sSecretMgr->Initialize(SECRET_OWNER_WORLDSERVER);

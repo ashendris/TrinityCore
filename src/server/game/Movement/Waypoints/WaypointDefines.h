@@ -62,7 +62,7 @@ struct WaypointNode
     Optional<WaypointMoveType> MoveType = {};
 };
 
-struct WaypointPath
+struct TC_GAME_API WaypointPath
 {
     WaypointPath() = default;
     WaypointPath(uint32 id, std::vector<WaypointNode>&& nodes, WaypointMoveType moveType = WaypointMoveType::Walk, WaypointPathFlags flags = WaypointPathFlags::None)

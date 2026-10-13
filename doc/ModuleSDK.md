@@ -1,6 +1,6 @@
 # TrinityCore Module SDK
 
-The module SDK is a source-level contract with a strict, core-commit-pinned binary ABI. Modules are dynamically loaded shared libraries (there is no static module mode) and are rebuilt for the exact worldserver commit that loads them. Hot reload is not part of this initial SDK.
+The module SDK is a versioned C ABI. Modules are dynamically loaded shared libraries and MUST use only SDK-owned headers. The loader negotiates the ABI version and capabilities before invoking a module. Native modules are trusted in-process code; production packages MUST carry a valid Ed25519 signature and library digest.
 
 ## Public entry point
 
@@ -9,65 +9,59 @@ Include the installed SDK header:
 ```cpp
 #include "TrinityModule.h"
 
-class MyModule final : public Trinity::Module
+static int32_t OnLoad(trinity_host const* host)
 {
-public:
-    void OnLoad(Trinity::ModuleContext& ctx) override;
-    void OnUnload() override;
-    void OnConfigReload() override;
-};
+    trinity_host_api_v1 const* api = TrinityHostApiV1(host);
+    if (!api || api->abi_version != TRINITY_ABI_V1)
+        return -1;
+    api->log.write(const_cast<trinity_host*>(host), 1, "module loaded", 13);
+    return 0;
+}
 
-TC_MODULE(MyModule, "my-module", "1.0.0", R"json({
-  "name": "my-module",
-  "version": "1.0.0",
-  "sdk": ">=1.0 <2.0",
-  "depends": [],
-  "databases": ["world"],
-  "config": "conf/my-module.conf"
-})json");
-```
-
-`TC_MODULE` is the only required entry point. It exports the ABI, manifest, create, and destroy functions of the shared library. The runtime validates the sidecar `module.json` before loading a shared library and validates strict ABI metadata before invoking its factory.
-
-The generated `TrinitySDKBuild.h` is included by both core and module builds. ABI metadata includes SDK major/minor, core revision, compiler identity, C++ runtime/CRT and debug token, and generated SDK header hash. A mismatch is a hard load refusal; there is no warning-only compatibility mode.
-
-## Context services
-
-`OnLoad` is called after the module's dependencies have loaded. Use the context rather than global configuration or logging categories:
-
-```cpp
-int limit = ctx.Config().GetInt("Limit", 10);
-bool enabled = ctx.Config().GetBool("Enabled", true);
-std::string label = ctx.Config().GetString("Label", "default");
-ctx.Log().Info("loaded {}", label);
-ctx.Log().Warn("warning");
-ctx.Log().Error("error");
-ctx.AddScript<MyWorldScript>();
-ctx.Services().Provide<IMyService>(std::make_shared<MyService>());
-auto service = ctx.Services().Require<IMyService>();
-```
-
-Configuration is namespaced as `Module.<manifest-name>.<key>`. A module's distributed config uses the `[worldserver]` section and should be copied into the active worldserver config path. The initial PoC reads values during `OnLoad`; changing them requires a worldserver restart. `OnConfigReload` is reserved for the runtime's later reload implementation.
-
-Script objects remain normal `WorldScript`, `CommandScript`, and other existing `ScriptObject` subclasses. `ctx.AddScript<T>()` registers them in the module's script context. Modules MUST NOT call `SwapScriptContext` themselves.
-
-## Manifest and resources
-
-A manifest (`module.json`) is JSON and MUST contain a semantic `name` and `version`, an SDK range, dependency constraints, and any declared database/config resources:
-
-```json
+extern "C" int32_t TrinityModuleGetApi(uint32_t requested_abi, trinity_module_api* out_api)
 {
-  "name": "my-module",
-  "version": "1.0.0",
-  "sdk": ">=1.0 <2.0",
-  "depends": ["provider >=1.0"],
-  "load_order": 100,
-  "databases": ["world"],
-  "config": "conf/my-module.conf"
+    if (requested_abi != TRINITY_ABI_V1 || !out_api)
+        return -1;
+    trinity_module_api api{};
+    api.size = sizeof(api);
+    api.abi_version = TRINITY_ABI_V1;
+    api.on_load = OnLoad;
+    *out_api = api;
+    return 0;
 }
 ```
 
-Runtime resources live under the worldserver `modules` directory (`bin/<config>/modules/` in the build tree):
+The generated header defines the stable module API, host query tables, capability IDs, opaque handles, and explicit script-family callback tables. A module MUST validate structure `size` fields before accessing optional fields. Unknown or unsupported capabilities MUST be rejected rather than assumed.
+
+## Host capabilities
+
+The v1 host exposes versioned tables for:
+
+- logging;
+- caller-owned configuration buffers;
+- command registration, permissions, console access, and command replies;
+- service registration and dependency lookup;
+- world lifecycle callbacks;
+- generated script-family callback declarations.
+
+Object pointers MUST NOT cross the boundary. Script callback operands are opaque handles and are valid only for the callback unless a host table documents a longer lifetime.
+
+The runtime currently dispatches the world callback family and command bridge. Other generated family tables are schema declarations until their corresponding host adapter is enabled; modules MUST NOT register an unsupported family.
+
+## Manifest and resources
+
+The manifest is authenticated before any native library, configuration, or SQL is processed. The signed `files` object maps every regular package file (native binary, configuration/default files, and SQL) to its SHA-256 digest; symlinks and files outside the package directory are rejected. The canonical signing bytes are compact UTF-8 JSON with `signature` removed and sorted keys, matching `sign_module.py`. Trusted keys are raw 32-byte or 64-hex-byte files named `<key_id>.pub` below `Modules.TrustedKeyDirectory`; key IDs and package names are restricted to safe basenames. Operators MUST treat the configured modules and trusted-key directories as a deployment boundary writable only by trusted administrators.
+
+```json
+{
+  "name": "my-module", "version": "1.0.0", "sdk": ">=1.0 <2.0",
+  "depends": [], "load_order": 100, "databases": ["world"],
+  "key_id": "publisher-2026", "files": {"my-module.so": "<sha256>"},
+  "signature": "<64-byte Ed25519 signature, hex>"
+}
+```
+
+Resources live under `modules/<name>` and are covered by `files`:
 
 ```text
 modules/<name>/module.json
@@ -77,42 +71,22 @@ modules/<name>/conf/*.conf.dist
 modules/<name>/sql/<database>/*.sql
 ```
 
-SQL is considered only for databases listed by the manifest. Update filenames MUST be unique across modules; rows MUST be scoped to module-owned values. `trinity_add_module` copies the manifest and resource files next to the shared library.
+## Building
 
-## Building in-tree
+Build and install the SDK from a matching TrinityCore build, then use it from an external module repository:
 
-The PoC modules are `modules/mod-greeting` and `modules/mod-example`. Modules are dynamic-only. Enable each with its CMake variable; the accepted values are `dynamic` and `disabled`:
+```sh
+cmake -S /path/to/TrinityCore -B /path/to/core-build \
+  -DCMAKE_INSTALL_PREFIX=/path/to/trinitycore-sdk
+cmake --build /path/to/core-build --config RelWithDebInfo
+cmake --install /path/to/core-build --config RelWithDebInfo
 
-```text
-cmake -S . -B build -DMODULE_MOD_GREETING=dynamic -DMODULE_MOD_EXAMPLE=dynamic
+cmake -S /path/to/module -B /path/to/module-build \
+  -DCMAKE_PREFIX_PATH=/path/to/trinitycore-sdk
+cmake --build /path/to/module-build --config RelWithDebInfo
 ```
 
-The variable name is `MODULE_<NAME>` with the module name upper-cased and `-` replaced by `_`. After the build, the outputs are:
-
-```text
-bin/<config>/modules/mod-greeting/mod-greeting.dll   # or .so on Linux
-bin/<config>/modules/mod-greeting/module.json
-bin/<config>/modules/mod-example/mod-example.dll     # or .so on Linux
-bin/<config>/modules/mod-example/module.json
-```
-
-Their CMake files use:
-
-```cmake
-find_package(TrinitySDK CONFIG REQUIRED)
-trinity_add_module(NAME mod-example
-  SOURCES src/mod_example.cpp
-  MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/module.json
-  CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/conf/mod-example.conf.dist
-  SQL ${CMAKE_CURRENT_SOURCE_DIR}/sql/world/mod_example_001.sql
-  INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/../mod-greeting/include)
-```
-
-`mod-greeting` provides `GreetingService` from `include/GreetingService.h`; `mod-example` declares `mod-greeting >=1.0` and requires that service. The examples demonstrate startup/shutdown hooks, namespaced config, prefixed logging, dependency ordering, and an RBAC-protected GM/console command.
-
-## Building against an installed SDK
-
-Install the core SDK package and configure an external CMake project with `CMAKE_PREFIX_PATH` pointing at the SDK install prefix:
+An external project uses:
 
 ```cmake
 find_package(TrinitySDK CONFIG REQUIRED)
@@ -123,29 +97,12 @@ trinity_add_module(NAME my-module
   SQL ${CMAKE_CURRENT_SOURCE_DIR}/sql/world/my_module_001.sql)
 ```
 
-For a provider/consumer pair, install/export the provider's public headers and pass the provider include directory through `INCLUDE_DIRS`; do not include private core source paths. Build the module with the same compiler, standard library/CRT, debug/release setting, and exact core revision recorded by the installed SDK.
+`trinity_add_module()` links only `Trinity::SDK`; it MUST NOT link `game`, `worldserver`, or private TrinityCore targets.
 
-## PoC command
+External examples are maintained in the separate `TrinityCoreModulesExamples` repository. For creation, build, test, package, deploy, upgrade, and CI procedures, see its [development guide](https://github.com/TrinityCore/TrinityCoreModulesExamples/blob/master/DEVELOPMENT.md).
 
-With both example modules loaded, a worldserver console or an account possessing the existing `RBAC_PERM_COMMAND_GM` permission can run:
+## Compatibility and security
 
-```text
-.module example hello
-```
+To sign a final package, use the SDK `sign_module.py` tool with `--manifest`, `--library`, `--package-root`, `--private-key`, and `--key-id`. Install only the resulting public key as `keys/<key_id>.pub` on the server. See the [end-to-end module guide](https://github.com/TrinityCore/TrinityCoreModulesExamples/blob/master/DEVELOPMENT.md) for exact Windows/Linux commands and runtime verification.
 
-The response is generated by `mod-greeting`'s service and uses `Module.mod-example.Subject`. No new RBAC ID is introduced and ordinary players cannot invoke it.
-
-## CI and release policy
-
-Every core commit is an ABI boundary. CI SHOULD rebuild modules against each supported core commit and publish artifacts named with commit, platform, compiler, CRT/runtime, and configuration, for example:
-
-```text
-mod-example-<commit>-linux-gcc13-libstdc++-Release.so
-mod-example-<commit>-windows-msvc143-ucrt-RelWithDebInfo.dll
-```
-
-The module SDK workflow builds Linux dynamic variants (GCC and Clang) and a Windows dynamic variant where the repository dependencies are available, installs the core SDK package, then configures and builds an external PoC against that installed package. The workflow records compiler/CRT/configuration in artifact names and fails if the external build or ABI metadata generation fails. A failed module rebuild is release-blocking feedback: publish no artifact for that core commit and fix the compatibility/build issue before distribution.
-
-## Verification status
-
-Shared-library runtime loading and hard ABI refusal, live-database SQL idempotence, and a fresh installed-SDK external build require the shared-core and MySQL development environments; those paths are documented but are not claimed as verified by this change.
+The module ABI version and capabilities, not arbitrary core C++ layout, define compatibility. A major ABI change requires a new ABI version. Native modules still have full server privileges. Signature verification authenticates the publisher and protects package integrity; it is not a sandbox.

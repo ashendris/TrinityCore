@@ -1,0 +1,3 @@
+[worldserver]
+# Name shown by the PoC command and lifecycle logs.
+Module.mod-example.Subject = module SDK

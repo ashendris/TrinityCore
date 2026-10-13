@@ -22,4 +22,9 @@ nbproject/*
 .vscode
 cmake-build-*/*
 .vs
+modules/*/build/
+modules/*/*.dll
+modules/*/*.so
+modules/*/*.dylib
+modules/*/plugins/
 *.user

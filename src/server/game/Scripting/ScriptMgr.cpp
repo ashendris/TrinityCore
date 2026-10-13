@@ -41,6 +41,7 @@
 #include "Player.h"
 #include "PlayerChoice.h"
 #include "ScriptReloadMgr.h"
+#include "ModuleMgr.h"
 #include "ScriptSystem.h"
 #include "SmartAI.h"
 #include "SpellInfo.h"
@@ -52,6 +53,7 @@
 #include "Weather.h"
 #include "WorldPacket.h"
 #include <unordered_map>
+#include <stdexcept>
 
 // Trait which indicates whether this script type
 // must be assigned in the database.
@@ -1330,6 +1332,9 @@ void ScriptMgr::Initialize()
            "Script loader callback wasn't registered!");
     _script_loader_callback();
 
+    if (!sModuleMgr->Load())
+        throw std::runtime_error("Module loading failed");
+
     // Initialize all dynamic scripts
     // and finishes the context switch to do
     // bulk loading
@@ -1385,6 +1390,7 @@ std::string const& ScriptMgr::GetNameOfStaticContext()
     static std::string const name = "___static___";
     return name;
 }
+
 
 void ScriptMgr::ReleaseScriptContext(std::string const& context)
 {

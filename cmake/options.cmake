@@ -25,6 +25,18 @@ endif()
 set(SCRIPTS "static" CACHE STRING "Build core with scripts")
 set_property(CACHE SCRIPTS PROPERTY STRINGS ${SCRIPTS_AVAILABLE_OPTIONS})
 
+# Modules are dynamically loaded and independently selectable.
+include(ConfigureModules)
+GetModuleList(MODULE_LIST)
+foreach(MODULE ${MODULE_LIST})
+  ModuleNameToVariable(${MODULE} MODULE_VARIABLE)
+  set(${MODULE_VARIABLE} "dynamic" CACHE STRING "Build type of the ${MODULE} module.")
+  set_property(CACHE ${MODULE_VARIABLE} PROPERTY STRINGS dynamic disabled)
+  if(NOT "${${MODULE_VARIABLE}}" MATCHES "^(dynamic|disabled)$")
+    message(FATAL_ERROR "${MODULE_VARIABLE} must be dynamic or disabled")
+  endif()
+endforeach()
+
 # Build a list of all script modules when -DSCRIPT="custom" is selected
 GetScriptModuleList(SCRIPT_MODULE_LIST)
 foreach(SCRIPT_MODULE ${SCRIPT_MODULE_LIST})

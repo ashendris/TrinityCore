@@ -118,6 +118,12 @@ DatabaseLoader& DatabaseLoader::AddDatabase(DatabaseWorkerPool<T>& pool, std::st
     return *this;
 }
 
+DatabaseLoader& DatabaseLoader::SetPreUpdateCallback(PreUpdateCallback callback)
+{
+    _preUpdateCallback = std::move(callback);
+    return *this;
+}
+
 bool DatabaseLoader::Load()
 {
     if (!_updateFlags)
@@ -127,6 +133,9 @@ bool DatabaseLoader::Load()
         return false;
 
     if (!PopulateDatabases())
+        return false;
+
+    if (_preUpdateCallback && !_preUpdateCallback("all"))
         return false;
 
     if (!UpdateDatabases())

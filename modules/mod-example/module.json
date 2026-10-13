@@ -1,0 +1,10 @@
+{
+  "name": "mod-example",
+  "version": "1.0.0",
+  "sdk": ">=1.0 <2.0",
+  "author": "TrinityCore",
+  "depends": ["mod-greeting >=1.0"],
+  "load_order": 200,
+  "databases": ["world"],
+  "config": "conf/mod-example.conf"
+}

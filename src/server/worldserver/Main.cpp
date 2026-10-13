@@ -28,6 +28,7 @@
 #include "Configuration/Config.h"
 #include "DatabaseEnv.h"
 #include "DatabaseLoader.h"
+#include "ModuleMgr.h"
 #include "DeadlineTimer.h"
 #include "GitRevision.h"
 #include "InstanceLockMgr.h"
@@ -349,10 +350,10 @@ int main(int argc, char** argv)
         TC_METRIC_EVENT("events", "Worldserver shutdown", "");
         metric->Unload();
     });
-
     auto scriptReloadMgrHandle = Trinity::make_unique_ptr_with_deleter<&ScriptReloadMgr::Unload>(sScriptReloadMgr);
-
     sScriptMgr->SetScriptLoader(AddScripts);
+    sModuleMgr->Discover();
+    auto sModuleMgrHandle = Trinity::make_unique_ptr_with_deleter<&Trinity::ModuleMgr::Unload>(sModuleMgr);
     auto sScriptMgrHandle = Trinity::make_unique_ptr_with_deleter<&ScriptMgr::Unload>(sScriptMgr);
 
     // Initialize the World
@@ -660,14 +661,16 @@ std::unique_ptr<Trinity::Net::AsyncAcceptor> StartRaSocketAcceptor(Trinity::Asio
 bool StartDB()
 {
     MySQL::Library_Init();
-
-    // Load databases
     DatabaseLoader loader("server.worldserver", DatabaseLoader::DATABASE_NONE);
     loader
         .AddDatabase(LoginDatabase, "Login")
         .AddDatabase(CharacterDatabase, "Character")
         .AddDatabase(WorldDatabase, "World")
-        .AddDatabase(HotfixDatabase, "Hotfix");
+        .AddDatabase(HotfixDatabase, "Hotfix")
+        .SetPreUpdateCallback([](std::string const& database)
+        {
+            return sModuleMgr->RegisterDatabaseUpdates(database);
+        });
 
     if (!loader.Load())
         return false;

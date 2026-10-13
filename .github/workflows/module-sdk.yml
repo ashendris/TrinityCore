@@ -1,0 +1,92 @@
+name: Module SDK
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.compiler }} dynamic
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc13
+            cc: gcc-13
+            cxx: g++-13
+          - compiler: clang17
+            cc: clang-17
+            cxx: clang++-17
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install core dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build gcc-13 g++-13 clang-17 libboost-dev libboost-filesystem-dev libboost-locale-dev libboost-program-options-dev libboost-regex-dev libboost-thread-dev libssl-dev libreadline-dev zlib1g-dev libbz2-dev
+      - name: Configure core and modules
+        env:
+          CC: /usr/bin/${{ matrix.cc }}
+          CXX: /usr/bin/${{ matrix.cxx }}
+        run: >
+          cmake -GNinja -S . -B build
+          -DSCRIPTS=dynamic -DMODULE_MOD_GREETING=dynamic -DMODULE_MOD_EXAMPLE=dynamic
+          -DSERVERS=1 -DTOOLS=0 -DWITH_WARNINGS=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/sdk-install
+      - name: Build core and modules
+        run: cmake --build build --parallel
+      - name: Install SDK and module resources
+        run: cmake --install build
+      - name: Build external PoC against installed SDK
+        env:
+          CC: /usr/bin/${{ matrix.cc }}
+          CXX: /usr/bin/${{ matrix.cxx }}
+        run: |
+          cmake -GNinja -S modules/mod-example -B external-example-build \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/sdk-install \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build external-example-build --parallel
+      - name: Package module artifact
+        run: |
+          mkdir -p artifacts
+          find sdk-install -type f \( -name 'mod-example.so' -o -name 'mod-greeting.so' -o -name 'module.json' \) -exec cp --parents {} artifacts/ \;
+          tar -C artifacts -czf "mod-modules-${GITHUB_SHA}-linux-${{ matrix.compiler }}-libstdc++-dynamic-RelWithDebInfo.tar.gz" .
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mod-modules-${{ github.sha }}-linux-${{ matrix.compiler }}-libstdc++-dynamic-RelWithDebInfo
+          path: mod-modules-*.tar.gz
+
+  windows:
+    name: Windows MSVC dynamic
+    runs-on: windows-latest
+    env:
+      CMAKE_BUILD_TYPE: RelWithDebInfo
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure core and modules
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DSCRIPTS=dynamic -DMODULE_MOD_GREETING=dynamic -DMODULE_MOD_EXAMPLE=dynamic
+          -DSERVERS=1 -DTOOLS=0 -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/sdk-install
+      - name: Build core and modules
+        run: cmake --build build --config RelWithDebInfo --parallel
+      - name: Install SDK and module resources
+        run: cmake --install build --config RelWithDebInfo
+      - name: Build external PoC against installed SDK
+        shell: pwsh
+        run: >
+          cmake -S modules/mod-example -B external-example-build -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH=${{ github.workspace }}/sdk-install -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build external PoC
+        run: cmake --build external-example-build --config RelWithDebInfo --parallel
+      - name: Package module artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Get-ChildItem -Path sdk-install -Recurse -Include mod-example.dll,mod-greeting.dll,module.json | Copy-Item -Destination artifacts -Force
+          Compress-Archive -Path artifacts/* -DestinationPath "mod-modules-${{ github.sha }}-windows-msvc143-ucrt-RelWithDebInfo.zip"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mod-modules-${{ github.sha }}-windows-msvc143-ucrt-RelWithDebInfo
+          path: mod-modules-*.zip

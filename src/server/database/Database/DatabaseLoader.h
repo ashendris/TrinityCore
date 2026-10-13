@@ -40,6 +40,9 @@ public:
     DatabaseLoader& AddDatabase(DatabaseWorkerPool<T>& pool, std::string const& name);
 
     // Load all databases
+
+    using PreUpdateCallback = std::function<bool(std::string const&)>;
+    DatabaseLoader& SetPreUpdateCallback(PreUpdateCallback callback);
     bool Load();
 
     enum DatabaseTypeFlags
@@ -72,6 +75,7 @@ private:
     uint32 const _updateFlags;
 
     std::queue<Predicate> _open, _populate, _update, _prepare;
+    PreUpdateCallback _preUpdateCallback;
     std::stack<Closer> _close;
 };
 

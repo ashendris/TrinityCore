@@ -29,6 +29,10 @@ target_link_libraries(game-interface
     shared
     mmaps_common)
 
+target_include_directories(game-interface
+  INTERFACE
+    ${CMAKE_BINARY_DIR}/sdk/generated/trinity)
+
 add_library(game)
 
 CollectAndAddSourceFiles(
@@ -39,13 +43,17 @@ CollectAndAddSourceFiles(
 
 target_include_directories(game
   PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR})
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_BINARY_DIR}/sdk/generated/trinity)
 
 target_link_libraries(game
   PRIVATE
     trinity-core-interface
   PUBLIC
     game-interface)
+if(UNIX)
+  target_link_libraries(game PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 if(TARGET efsw)
   target_link_libraries(game
@@ -53,11 +61,9 @@ if(TARGET efsw)
       efsw)
 endif()
 
-set_target_properties(game
-  PROPERTIES
-    COMPILE_WARNING_AS_ERROR ${WITH_WARNINGS_AS_ERRORS}
-    DEFINE_SYMBOL TRINITY_API_EXPORT_GAME
-    FOLDER "server")
+if(BUILD_SHARED_LIBS)
+  set_target_properties(game PROPERTIES DEFINE_SYMBOL TRINITY_API_EXPORT_GAME)
+endif()
 
 if(BUILD_SHARED_LIBS)
   if(UNIX)

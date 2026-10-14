@@ -1161,8 +1161,71 @@ class classic_spell_tauren_cultivate_herb : public SpellScript
     }
 };
 
+// Classic 1.60 (client 70374) warrior talent Gore Drinker 1323967: "Your Enrage, Berserker Rage, Bloodrage, Death Wish, and Bloodthirst
+// abilities cause your next $m1 melee attacks to restore ${$s2}.1% of your maximum Health." (both effects are server-side dummies: 4
+// attacks, 0.5 / 1% by rank). The buff 1323969 procs on melee attacks (SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE) and heals with 1323968
+// for its amount.
+namespace ClassicGoreDrinker
+{
+    static constexpr uint32 SPELL_GORE_DRINKER_TALENT = 1323967;
+    static constexpr uint32 SPELL_GORE_DRINKER_BUFF = 1323969;
+
+    static void Apply(Unit* warrior)
+    {
+        AuraEffect const* attacks = warrior->GetAuraEffect(SPELL_GORE_DRINKER_TALENT, EFFECT_0);
+        AuraEffect const* healthPct = warrior->GetAuraEffect(SPELL_GORE_DRINKER_TALENT, EFFECT_1);
+        if (!attacks || !healthPct || attacks->GetAmount() <= 0 || healthPct->GetAmount() <= 0)
+            return;
+
+        int32 heal = std::max(1, int32(warrior->CountPctFromMaxHealth(healthPct->GetAmount())));
+        warrior->CastSpell(warrior, SPELL_GORE_DRINKER_BUFF, CastSpellExtraArgs(TRIGGERED_FULL_MASK).AddSpellBP0(heal));
+        if (Aura* buff = warrior->GetAura(SPELL_GORE_DRINKER_BUFF))
+            buff->SetCharges(uint8(attacks->GetAmount()));
+    }
+}
+
+// 2687 - Bloodrage, 18499 - Berserker Rage, 12328 - Death Wish, 23881, 23892, 23893, 23894 - Bloodthirst: Gore Drinker
+class classic_spell_warr_gore_drinker : public SpellScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ ClassicGoreDrinker::SPELL_GORE_DRINKER_BUFF });
+    }
+
+    void HandleAfterCast()
+    {
+        ClassicGoreDrinker::Apply(GetCaster());
+    }
+
+    void Register() override
+    {
+        AfterCast += SpellCastFn(classic_spell_warr_gore_drinker::HandleAfterCast);
+    }
+};
+
+// 12880 - Enrage (talent proc buff): Gore Drinker
+class classic_spell_warr_gore_drinker_enrage : public AuraScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ ClassicGoreDrinker::SPELL_GORE_DRINKER_BUFF });
+    }
+
+    void HandleApply(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+    {
+        ClassicGoreDrinker::Apply(GetTarget());
+    }
+
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(classic_spell_warr_gore_drinker_enrage::HandleApply, EFFECT_0, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
 void AddSC_classic_spell_scripts()
 {
+    RegisterSpellScript(classic_spell_warr_gore_drinker);
+    RegisterSpellScript(classic_spell_warr_gore_drinker_enrage);
     RegisterSpellScript(classic_spell_tauren_cultivation);
     RegisterSpellScript(classic_spell_tauren_cultivate_herb);
     new classic_unit_tigers_fury();

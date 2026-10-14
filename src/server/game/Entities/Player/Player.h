@@ -874,6 +874,10 @@ enum class BagSlotFlags : uint32
     PriorityReagents    = 0x0080,
     ExpansionCurrent    = 0x0100,
     ExpansionLegacy     = 0x0200,
+
+    // server only, kept in characters.inventoryBagFlags: the bag sort direction settings (ActivePlayerData)
+    SortBagsRightToLeft     = 0x10000000,
+    InsertItemsLeftToRight  = 0x20000000,
 };
 
 DEFINE_ENUM_FLAG(BagSlotFlags);
@@ -1355,6 +1359,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         PetStable& GetOrInitPetStable();
         PetStable const* GetPetStable() const { return m_petStable.get(); }
         void AddPetToUpdateFields(PetStable::PetInfo const& pet, PetSaveMode slot, PetStableFlags flags);
+        void UpdateStablePetLoyalty(uint32 petNumber, uint8 loyaltyLevel, int32 loyaltyPoints);   // Classic 1.60 hunter pet loyalty
         void SetPetSlot(uint32 petNumber, PetSaveMode dstPetSlot);
         uint8 GetNumStableSlots() const { return m_activePlayerData->NumStableSlots; }
         void SetNumStableSlots(uint8 slots);
@@ -1539,6 +1544,10 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         void SetBackpackSellJunkDisabled(bool disabled) { SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::BackpackSellJunkDisabled), disabled); }
         bool IsBankAutoSortDisabled() const { return m_activePlayerData->BankAutoSortDisabled; }
         void SetBankAutoSortDisabled(bool disabled) { SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::BankAutoSortDisabled), disabled); }
+        bool IsSortBagsRightToLeft() const { return m_activePlayerData->SortBagsRightToLeft; }
+        void SetSortBagsRightToLeft(bool enabled) { SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::SortBagsRightToLeft), enabled); }
+        bool IsInsertItemsLeftToRight() const { return m_activePlayerData->InsertItemsLeftToRight; }
+        void SetInsertItemsLeftToRight(bool enabled) { SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::InsertItemsLeftToRight), enabled); }
         EnumFlag<BagSlotFlags> GetBagSlotFlags(uint32 bagIndex) const { return static_cast<BagSlotFlags>(m_activePlayerData->BagSlotFlags[bagIndex]); }
         void SetBagSlotFlag(uint32 bagIndex, EnumFlag<BagSlotFlags> flags) { SetUpdateFieldFlagValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::BagSlotFlags, bagIndex), flags.AsUnderlyingType()); }
         void RemoveBagSlotFlag(uint32 bagIndex, EnumFlag<BagSlotFlags> flags) { RemoveUpdateFieldFlagValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::BagSlotFlags, bagIndex), flags.AsUnderlyingType()); }
@@ -1667,6 +1676,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         Player* GetTrader() const;
         TradeData* GetTradeData() const { return m_trade; }
         void TradeCancel(bool sendback, TradeStatus status = TRADE_STATUS_CANCELLED);
+        void UpdateTradeState();
 
         CinematicMgr* GetCinematicMgr() const { return _cinematicMgr.get(); }
 
@@ -1971,6 +1981,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         void SendRemoveControlBar() const;
         bool HasSpell(uint32 spell) const override;
         bool HasActiveSpell(uint32 spell) const;            // show in spellbook
+        uint32 ResolveSupersededRank(uint32 spellId) const; // Classic 1.60: the active higher rank of a known but superseded rank, else spellId
         SpellInfo const* GetCastSpellInfo(SpellInfo const* spellInfo, TriggerCastFlags& triggerFlag, GetCastSpellInfoContext* context) const override;
         bool IsSpellFitByClassAndRace(uint32 spell_id) const;
         bool HandlePassiveSpellLearn(SpellInfo const* spellInfo);
@@ -2384,6 +2395,12 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         Optional<WorldLocation> m_deathRecapReturn;
         void BuildPlayerRepop();
         void RepopAtGraveyard();
+        // Classic 1.60: a graveyard row whose Z lies under the terrain (retail world_safe_locs Z against Classic terrain) drops the ghost
+        // out of the world. Raises loc to the floor when it is buried (no static surface near it); returns true when it moved the point.
+        bool SnapBuriedLocToFloor(Map* map, WorldLocation& loc, uint32 safeLocId) const;
+        // Set by RepopAtGraveyard for a far teleport, consumed by the worldport ack (the destination map only exists there)
+        void SetGraveyardTeleportId(uint32 id) { m_graveyardTeleportId = id; }
+        uint32 ConsumeGraveyardTeleportId() { uint32 id = m_graveyardTeleportId; m_graveyardTeleportId = 0; return id; }
 
         void DurabilityLossAll(double percent, bool inventory);
         void DurabilityLoss(Item* item, double percent);
@@ -2472,6 +2489,7 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         // These methods are used to periodically update certain area and aura based mechanics used in Heartbeat and Movement
         void UpdateZoneAndAreaId();
         void UpdateIndoorsOutdoorsAuras();
+        bool IsMountRestrictedHere(bool checkStartArea) const;
         void UpdateTavernRestingState();
 
         static Team TeamForRace(uint8 race);
@@ -3132,6 +3150,8 @@ class TC_GAME_API Player final : public Unit, public GridObject<Player>
         // Gamemaster whisper whitelist
         GuidList WhisperList;
         TimePoint m_regenInterruptTimestamp;
+        TimePoint m_manaSpentTimestamp;                     // Classic 1.60: the five second rule starts when mana is paid, nothing else
+        uint32 m_graveyardTeleportId = 0;                   // graveyard of a far repop teleport, checked by the worldport ack
         uint32 m_regenTimerCount;
         float m_healthFraction;
         std::array<float, MAX_POWERS_PER_CLASS> m_powerFraction;

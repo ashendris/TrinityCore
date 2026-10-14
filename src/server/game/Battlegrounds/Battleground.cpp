@@ -45,8 +45,11 @@
 #include "ReputationMgr.h"
 #include "SpellAuras.h"
 #include "TemporarySummon.h"
+#include "TerrainMgr.h"
 #include "Transport.h"
 #include "Util.h"
+#include "VMapFactory.h"
+#include "VMapManager.h"
 #include "WorldStateMgr.h"
 #include <cstdarg>
 
@@ -514,6 +517,22 @@ WorldSafeLocsEntry const* Battleground::GetTeamStartPosition(TeamId teamId) cons
     return _battlegroundTemplate->StartLocation[teamId];
 }
 
+bool Battleground::IsMountRefused(Player const* player, bool checkStartArea) const
+{
+    if (checkStartArea && GetStatus() == STATUS_WAIT_JOIN && IsEnclosedStartArea(GetMapId()))
+        return true;
+
+    if (!VMAP::VMapFactory::createOrGetVMapManager()->isLineOfSightCalcEnabled())
+        return false;
+
+    // the wmo group under the player decides like on the client, not IsOutdoors(): its WMOAreaTable indoor override hits the wrong groups here
+    Map* map = player->GetMap();
+    uint32 mogpFlags = 0;
+    int32 adtId = 0, rootId = 0, groupId = 0;
+    return map->GetTerrain()->GetAreaInfo(player->GetPhaseShift(), map->GetId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
+        mogpFlags, adtId, rootId, groupId) && IsIndoorWmoGroup(mogpFlags);
+}
+
 float Battleground::GetStartMaxDist() const
 {
     return _battlegroundTemplate->MaxStartDistSq;
@@ -895,6 +914,11 @@ void Battleground::RemovePlayerAtLeave(ObjectGuid guid, bool Transport, bool Sen
                 player->ResummonPetTemporaryUnSummonedIfAny();
             }
 
+            // close the match state opened at the start on every way out (leave, kick, teleport away, the leave after the scoreboard);
+            // the client keeps its PvP match (restricted addon environment) active until told otherwise and the chat box stays broken
+            if (SendPacket)
+                player->SendDirectMessage(WorldPackets::Battleground::PVPMatchSetState(WorldPackets::Battleground::PVPMatchState::Inactive).Write());
+
             if (SendPacket && bgQueueTypeId)
             {
                 WorldPackets::Battleground::BattlefieldStatusNone battlefieldStatus;
@@ -938,8 +962,10 @@ void Battleground::RemovePlayerAtLeave(ObjectGuid guid, bool Transport, bool Sen
         // remove all criterias on bg leave
         player->FailCriteria(CriteriaFailEvent::LeaveBattleground, 0);
 
-        if (Transport)
-            player->TeleportToBGEntryPoint();
+        // a failed exit teleport strands the player on the battleground map once this object is deleted
+        if (Transport && !player->TeleportToBGEntryPoint())
+            TC_LOG_ERROR("bg.battleground", "Battleground::RemovePlayerAtLeave: exit teleport failed for {} ({}), player remains on battleground map {} (instance {})",
+                player->GetName(), guid.ToString(), GetMapId(), m_InstanceID);
 
         TC_LOG_DEBUG("bg.battleground", "Removed player {} from Battleground.", player->GetName());
     }
@@ -1359,7 +1385,10 @@ void Battleground::SendMessageToAll(uint32 entry, ChatMsg msgType, Player const*
 
 void Battleground::AddPlayerPosition(WorldPackets::Battleground::BattlegroundPlayerPosition const& position)
 {
+    // one entry per player: a script that registers the carrier itself and the position aura must not duplicate it
+    RemovePlayerPosition(position.Guid);
     _playerPositions.push_back(position);
+    m_LastPlayerPositionBroadcast = PLAYER_POSITION_UPDATE_INTERVAL;   // sent on the next update, not up to 5 s later
 }
 
 void Battleground::RemovePlayerPosition(ObjectGuid guid)

@@ -38,6 +38,7 @@
 #include "Pet.h"
 #include "Player.h"
 #include "UpdateData.h"
+#include "World.h"
 #include "WorldSession.h"
 
 Seconds Group::CountdownInfo::GetTimeLeft() const
@@ -60,7 +61,8 @@ Group::Group() : m_leaderGuid(), m_leaderFactionGroup(0), m_leaderName(""), m_gr
 m_dungeonDifficulty(DIFFICULTY_NORMAL), m_raidDifficulty(DIFFICULTY_NORMAL_RAID), m_legacyRaidDifficulty(DIFFICULTY_10_N),
 m_bgGroup(nullptr), m_bfGroup(nullptr), m_lootMethod(PERSONAL_LOOT), m_lootThreshold(ITEM_QUALITY_UNCOMMON), m_looterGuid(),
 m_masterLooterGuid(), m_subGroupsCounts(nullptr), m_guid(), m_dbStoreId(0), m_isLeaderOffline(false),
-m_readyCheckStarted(false), m_readyCheckTimer(Milliseconds::zero()), m_activeMarkers(0), m_scriptRef(this, NoopGroupDeleter())
+m_readyCheckStarted(false), m_readyCheckTimer(Milliseconds::zero()), m_activeMarkers(0), m_pingRestriction(RestrictPingsTo::None),
+m_scriptRef(this, NoopGroupDeleter())
 {
     for (uint8 i = 0; i < TARGET_ICONS_COUNT; ++i)
         m_targetIcons[i].Clear();
@@ -157,6 +159,11 @@ bool Group::Create(Player* leader)
 
     if (m_groupFlags & GROUP_FLAG_RAID)
         _initRaidSubGroupsCounter();
+
+    // Classic 1.60 (vanilla): with shared boss loot a new group starts on group loot, as in vanilla; personal loot would make the
+    // shared boss corpse free for all
+    if (sWorld->getBoolConfig(CONFIG_LOOT_SHARED_ENCOUNTER_LOOT) && !isBGGroup() && !isBFGroup())
+        m_lootMethod = GROUP_LOOT;
 
     m_lootThreshold = ITEM_QUALITY_UNCOMMON;
     m_looterGuid = leaderGuid;
@@ -283,7 +290,8 @@ void Group::ConvertToLFG()
 {
     m_groupFlags = GroupFlags(m_groupFlags | GROUP_FLAG_LFG | GROUP_FLAG_LFG_RESTRICTED);
     m_groupCategory = GROUP_CATEGORY_INSTANCE;
-    m_lootMethod = PERSONAL_LOOT;
+    // dungeon finder groups cannot change the method: group loot with shared boss loot (see Group::Create)
+    m_lootMethod = sWorld->getBoolConfig(CONFIG_LOOT_SHARED_ENCOUNTER_LOOT) ? GROUP_LOOT : PERSONAL_LOOT;
     if (!isBGGroup() && !isBFGroup())
     {
         CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_GROUP_TYPE);
@@ -1057,6 +1065,7 @@ void Group::ChangeMembersGroup(ObjectGuid guid, uint8 group)
 
     // Broadcast the changes to the group
     SendUpdate();
+    sScriptMgr->OnGroupSubgroupChange(this, guid, group);
 }
 
 void Group::SwapMembersGroups(ObjectGuid firstGuid, ObjectGuid secondGuid)
@@ -1102,6 +1111,8 @@ void Group::SwapMembersGroups(ObjectGuid firstGuid, ObjectGuid secondGuid)
     CharacterDatabase.CommitTransaction(trans);
 
     SendUpdate();
+    sScriptMgr->OnGroupSubgroupChange(this, slots[0]->guid, slots[0]->group);
+    sScriptMgr->OnGroupSubgroupChange(this, slots[1]->guid, slots[1]->group);
 }
 
 // Retrieve the next Round-Roubin player for the group
@@ -1430,6 +1441,10 @@ void Group::SetLfgRoles(ObjectGuid guid, uint8 roles)
 {
     member_witerator slot = _getMemberWSlot(guid);
     if (slot == m_memberSlots.end())
+        return;
+
+    // unchanged roles need no party update
+    if (slot->roles == roles)
         return;
 
     slot->roles = roles;

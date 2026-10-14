@@ -19,6 +19,7 @@
 #include "DB2Stores.h"
 #include "Item.h"
 #include "Player.h"
+#include "ClassicManaRegen.h"
 #include "Pet.h"
 #include "GameTables.h"
 #include "GameTime.h"
@@ -171,6 +172,13 @@ void Player::ApplySpellPowerBonus(int32 amount, bool apply)
 
 void Player::UpdateSpellDamageAndHealingBonus()
 {
+    // SPELL_AURA_OVERRIDE_ATTACK_POWER_BY_SP_PCT together with SPELL_AURA_OVERRIDE_SPELL_POWER_BY_AP_PCT make this and
+    // UpdateAttackPowerAndDamage call each other without end
+    thread_local bool inSpellDamageUpdate = false;
+    if (inSpellDamageUpdate)
+        return;
+    inSpellDamageUpdate = true;
+
     // Magic damage modifiers implemented in Unit::SpellDamageBonusDone
     // This information for client side use only
     // Get healing bonus for all schools
@@ -195,6 +203,8 @@ void Player::UpdateSpellDamageAndHealingBonus()
         UpdateAttackPowerAndDamage();
         UpdateAttackPowerAndDamage(true);
     }
+
+    inSpellDamageUpdate = false;
 }
 
 bool Player::UpdateAllStats()
@@ -1052,6 +1062,17 @@ float Player::GetPowerRegen(Powers power) const
     PowerTypeEntry const* powerType = sDB2Manager.GetPowerTypeEntry(power);
     if (!powerType)
         return 0.f;
+
+    if (power == POWER_MANA)
+    {
+        // Classic 1.60 (vanilla): five second rule (ClassicManaRegen.h). The window starts when mana is paid (Spell::TakePower), the
+        // interrupted rate is the share of SPELL_AURA_MOD_MANA_REGEN_INTERRUPT (not zero), and combat does not interrupt the regeneration.
+        // Leaving combat does not start the window, so it has a timestamp of its own.
+        int64 const msSinceManaSpent = std::chrono::duration_cast<Milliseconds>(GameTime::Now() - m_manaSpentTimestamp).count();
+        bool const manaInterrupted = ClassicManaRegen::IsInterrupted(msSinceManaSpent, HasAuraType(SPELL_AURA_INTERRUPT_REGEN));
+        return manaInterrupted ? powerType->RegenCombat + m_unitData->PowerRegenInterruptedFlatModifier[powerIndex]
+                               : powerType->RegenPeace + m_unitData->PowerRegenFlatModifier[powerIndex];
+    }
 
     if (powerType->GetFlags().HasFlag(PowerTypeFlags::UseRegenInterrupt) && m_regenInterruptTimestamp + Milliseconds(powerType->RegenInterruptTimeMS) >= GameTime::Now())
         return 0.f;

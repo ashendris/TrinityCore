@@ -165,8 +165,10 @@ void AuraApplication::_HandleEffect(uint8 effIndex, bool apply)
         return;
     }
     ASSERT(aurEff);
-    ASSERT(HasEffect(effIndex) == (!apply));
-    ASSERT((1<<effIndex) & _effectsToApply);
+    ASSERT(HasEffect(effIndex) == (!apply), "Aura %u effect %u apply %u: effectMask 0x%X effectsToApply 0x%X removeMode %u target %s",
+        GetBase()->GetId(), uint32(effIndex), uint32(apply), _effectMask, _effectsToApply, uint32(GetRemoveMode()), GetTarget()->GetGUID().ToString().c_str());
+    ASSERT((1<<effIndex) & _effectsToApply, "Aura %u effect %u not in effectsToApply 0x%X (effectMask 0x%X)",
+        GetBase()->GetId(), uint32(effIndex), _effectsToApply, _effectMask);
     TC_LOG_DEBUG("spells", "AuraApplication::_HandleEffect: {}, apply: {}: amount: {}", aurEff->GetAuraType(), apply, aurEff->GetAmount());
 
     if (apply)
@@ -524,6 +526,12 @@ void Aura::_InitEffects(uint32 effMask, Unit* caster, SpellEffectValue const* ba
 bool Aura::CanPeriodicTickCrit() const
 {
     if (GetSpellInfo()->HasAttribute(SPELL_ATTR2_CANT_CRIT))
+        return false;
+
+    // Classic 1.60 (vanilla): damage and healing over time never critically strike (Renew, Rejuvenation, Corruption, Immolate...).
+    // Ids from 1000000 on are spells new to Forever and keep their client attributes.
+    static constexpr uint32 FirstForeverSpellId = 1000000;
+    if (GetId() < FirstForeverSpellId)
         return false;
 
     if (GetSpellInfo()->HasAttribute(SPELL_ATTR8_PERIODIC_CAN_CRIT))

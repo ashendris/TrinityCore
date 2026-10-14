@@ -27,11 +27,14 @@
 #include "DB2Stores.h"
 #include "Formulas.h"
 #include "GameObject.h"
+#include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "PhasingHandler.h"
 #include "Player.h"
 #include "QuestDef.h"
 #include "SpellAuraEffects.h"
@@ -41,6 +44,8 @@
 #include "ThreatManager.h"
 #include "Unit.h"
 #include "WorldSession.h"
+#include <mutex>
+#include <unordered_map>
 
 /*######
 ## classic_spell_ground_area_damage
@@ -1011,8 +1016,155 @@ public:
     }
 };
 
+// Tauren racial Cultivation (1.60): "Cultivate a nearby herb, growing a duplicate you can harvest without requiring Herbalism skill.
+// Each herb may only be cultivated once." Official sniffs (2026-09-28, 2026-10-01): the spellbook spell 20552 (instant, dummy on game
+// objects within 5 yd) makes the server start 1312643 (3 sec cast) on the herb; when it completes a duplicate herb appears on the same
+// spot, created by the player: same model and loot, lock 4522 = key spell 1312650 (open lock without skill, the player does not know
+// it; Player allows lock key spells of the target). Peacebloom 1618 -> 657382, Wilted Peacebloom 656160 -> 657454; the other twins are
+// made by 2026_10_14_00_world_classic_tauren_cultivation.sql. A twin is found by model + loot.
+namespace ClassicCultivation
+{
+    static constexpr uint32 SPELL_CULTIVATE_HERB = 1312643;
+    static constexpr uint32 LOCK_CULTIVATED_HERB = 4522;
+    static constexpr float SEARCH_RANGE = 5.0f;
+    static constexpr Seconds TWIN_DURATION = 5min;
+    static constexpr Seconds HERB_COOLDOWN = 15min;    // "each herb may only be cultivated once" (until it has been picked and regrown)
+
+    static bool IsHerbalismLock(uint32 lockId)
+    {
+        LockEntry const* lock = sLockStore.LookupEntry(lockId);
+        if (!lock)
+            return false;
+        for (uint8 i = 0; i < MAX_LOCK_CASE; ++i)
+            if (lock->Type[i] == LOCK_KEY_SKILL && lock->Index[i] == LOCKTYPE_HERBALISM)
+                return true;
+        return false;
+    }
+
+    // herb (model, loot) -> twin entry
+    static uint32 GetTwinEntry(GameObjectTemplate const* herb)
+    {
+        static std::unordered_map<uint64, uint32> const twins = []
+        {
+            std::unordered_map<uint64, uint32> map;
+            for (auto const& [entry, goInfo] : sObjectMgr->GetGameObjectTemplates())
+                if (goInfo.type == GAMEOBJECT_TYPE_CHEST && goInfo.chest.open == LOCK_CULTIVATED_HERB)
+                    map.emplace(uint64(goInfo.displayId) << 32 | goInfo.chest.chestLoot, entry);
+            return map;
+        }();
+        if (!herb || herb->type != GAMEOBJECT_TYPE_CHEST || !IsHerbalismLock(herb->chest.open))
+            return 0;
+        auto itr = twins.find(uint64(herb->displayId) << 32 | herb->chest.chestLoot);
+        return itr != twins.end() ? itr->second : 0;
+    }
+
+    static std::unordered_map<ObjectGuid, TimePoint> CultivatedHerbs;
+    static std::mutex CultivatedHerbsLock;
+
+    static bool WasCultivated(ObjectGuid const& herb)
+    {
+        std::lock_guard<std::mutex> guard(CultivatedHerbsLock);
+        auto itr = CultivatedHerbs.find(herb);
+        if (itr == CultivatedHerbs.end())
+            return false;
+        if (GameTime::Now() - itr->second < HERB_COOLDOWN)
+            return true;
+        CultivatedHerbs.erase(itr);
+        return false;
+    }
+
+    static void MarkCultivated(ObjectGuid const& herb)
+    {
+        std::lock_guard<std::mutex> guard(CultivatedHerbsLock);
+        CultivatedHerbs[herb] = GameTime::Now();
+    }
+
+    static bool CanCultivate(GameObject const* go)
+    {
+        return go && go->isSpawned() && go->GetGoState() == GO_STATE_READY && !go->GetOwnerGUID()
+            && GetTwinEntry(go->GetGOInfo()) && !WasCultivated(go->GetGUID());
+    }
+
+    static GameObject* FindHerb(Unit* caster)
+    {
+        std::list<GameObject*> objects;
+        Trinity::AllWorldObjectsInRange check(caster, SEARCH_RANGE);
+        Trinity::GameObjectListSearcher<Trinity::AllWorldObjectsInRange> searcher(caster, objects, check);
+        Cell::VisitGridObjects(caster, searcher, SEARCH_RANGE);
+        GameObject* best = nullptr;
+        for (GameObject* go : objects)
+            if (CanCultivate(go) && (!best || caster->GetExactDist2dSq(go) < caster->GetExactDist2dSq(best)))
+                best = go;
+        return best;
+    }
+}
+
+// 20552 - Cultivation (Tauren racial, spellbook): starts Cultivate (1312643) on the nearest herb within 5 yd
+class classic_spell_tauren_cultivation : public SpellScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ ClassicCultivation::SPELL_CULTIVATE_HERB });
+    }
+
+    SpellCastResult CheckCast()
+    {
+        return ClassicCultivation::FindHerb(GetCaster()) ? SPELL_CAST_OK : SPELL_FAILED_NO_VALID_TARGETS;
+    }
+
+    void HandleAfterCast()
+    {
+        if (GameObject* herb = ClassicCultivation::FindHerb(GetCaster()))
+            GetCaster()->CastSpell(herb, ClassicCultivation::SPELL_CULTIVATE_HERB, CastSpellExtraArgs(TRIGGERED_IGNORE_GCD));
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(classic_spell_tauren_cultivation::CheckCast);
+        AfterCast += SpellCastFn(classic_spell_tauren_cultivation::HandleAfterCast);
+    }
+};
+
+// 1312643 - Cultivate: the herb's twin grows on the same spot, for the caster only
+class classic_spell_tauren_cultivate_herb : public SpellScript
+{
+    SpellCastResult CheckCast()
+    {
+        GameObject* herb = GetExplTargetGObj();
+        return ClassicCultivation::CanCultivate(herb) ? SPELL_CAST_OK : SPELL_FAILED_BAD_TARGETS;
+    }
+
+    void HandleDummy(SpellEffIndex /*effIndex*/)
+    {
+        Player* caster = GetCaster()->ToPlayer();
+        GameObject* herb = GetHitGObj();
+        if (!caster || !ClassicCultivation::CanCultivate(herb))
+            return;
+
+        uint32 twinEntry = ClassicCultivation::GetTwinEntry(herb->GetGOInfo());
+        GameObject* twin = GameObject::CreateGameObject(twinEntry, herb->GetMap(), *herb, herb->GetLocalRotation(), 255, GO_STATE_READY);
+        if (!twin)
+            return;
+
+        ClassicCultivation::MarkCultivated(herb->GetGUID());
+        PhasingHandler::InheritPhaseShift(twin, caster);
+        twin->SetPrivateObjectOwner(caster->GetGUID());
+        twin->SetRespawnTime(ClassicCultivation::TWIN_DURATION.count());
+        caster->AddGameObject(twin);
+        herb->GetMap()->AddToMap(twin);
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(classic_spell_tauren_cultivate_herb::CheckCast);
+        OnEffectHitTarget += SpellEffectFn(classic_spell_tauren_cultivate_herb::HandleDummy, EFFECT_0, SPELL_EFFECT_DUMMY);
+    }
+};
+
 void AddSC_classic_spell_scripts()
 {
+    RegisterSpellScript(classic_spell_tauren_cultivation);
+    RegisterSpellScript(classic_spell_tauren_cultivate_herb);
     new classic_unit_tigers_fury();
     RegisterSpellScript(classic_spell_pri_vampiric_embrace);
     RegisterSpellScript(classic_spell_pal_consecration);

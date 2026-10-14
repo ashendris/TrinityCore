@@ -163,6 +163,14 @@ bool normalizePlayerName(std::string& name)
     if (!Utf8toWStr(name, tmp))
         return false;
 
+    // The Classic client's unit menu passes "Name " (name + empty surname) to invite/whisper/ignore/friend:
+    // trim surrounding blanks (plain, non-breaking and zero-width) so every lookup that normalizes first finds the player
+    static wchar_t const* const blanks = L" \t\u00A0\u200B\u200C\u200D\u200E\u200F\uFEFF";
+    std::wstring::size_type first = tmp.find_first_not_of(blanks);
+    if (first == std::wstring::npos)
+        return false;
+    tmp = tmp.substr(first, tmp.find_last_not_of(blanks) - first + 1);
+
     wstrToLower(tmp);
     if (!tmp.empty())
         tmp[0] = wcharToUpper(tmp[0]);
@@ -721,6 +729,133 @@ uint32 ObjectMgr::GetItemClassicBlock(uint32 entry) const
     return block ? *block : 0;
 }
 
+void ObjectMgr::LoadShop()
+{
+    uint32 oldMSTime = getMSTime();
+
+    _shopGroupStore.clear();
+    _shopProductStore.clear();
+
+    //                                               0   1     2               3
+    if (QueryResult result = WorldDatabase.Query("SELECT ID, Name, IconFileDataID, Ordering FROM shop_group"))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            ShopGroup& group = _shopGroupStore[fields[0].GetUInt32()];
+            group.ID = fields[0].GetUInt32();
+            group.Name = fields[1].GetString();
+            group.IconFileDataID = fields[2].GetInt32();
+            group.Ordering = fields[3].GetInt32();
+        } while (result->NextRow());
+    }
+
+    //                                               0   1        2     3            4               5      6            7
+    if (QueryResult result = WorldDatabase.Query("SELECT ID, GroupID, Name, Description, IconFileDataID, Price, NormalPrice, Ordering FROM shop_product WHERE Enabled = 1"))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            uint32 id = fields[0].GetUInt32();
+            uint32 groupId = fields[1].GetUInt32();
+            if (!_shopGroupStore.contains(groupId))
+            {
+                TC_LOG_ERROR("sql.sql", "Table `shop_product`: product {} has non-existing GroupID {}, skipped.", id, groupId);
+                continue;
+            }
+
+            ShopProduct& product = _shopProductStore[id];
+            product.ID = id;
+            product.GroupID = groupId;
+            product.Name = fields[2].GetString();
+            product.Description = fields[3].GetString();
+            if (product.Description.size() > 8191)     // 13 bit length in the packet
+                product.Description.resize(8191);
+            product.IconFileDataID = fields[4].GetInt32();
+            product.Price = fields[5].GetUInt32();
+            product.NormalPrice = fields[6].GetUInt32();
+            product.Ordering = fields[7].GetInt32();
+        } while (result->NextRow());
+    }
+
+    //                                               0          1       2       3
+    if (QueryResult result = WorldDatabase.Query("SELECT ProductID, Action, Param1, Param2 FROM shop_product_action ORDER BY ProductID, `Index`"))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            uint32 productId = fields[0].GetUInt32();
+            ShopProduct* product = Trinity::Containers::MapGetValuePtr(_shopProductStore, productId);
+            if (!product)
+                continue;
+
+            ShopProductAction action;
+            action.Action = ShopAction(fields[1].GetUInt8());
+            action.Param1 = fields[2].GetInt32();
+            action.Param2 = fields[3].GetInt32();
+
+            bool valid = true;
+            switch (action.Action)
+            {
+                case ShopAction::Item:
+                    valid = GetItemTemplate(action.Param1) != nullptr;
+                    action.Param2 = std::max(action.Param2, 1);
+                    break;
+                case ShopAction::Gold:
+                    valid = action.Param1 > 0;
+                    break;
+                case ShopAction::Spell:
+                    valid = sSpellMgr->GetSpellInfo(action.Param1, DIFFICULTY_NONE) != nullptr;
+                    break;
+                case ShopAction::Service:
+                    valid = action.Param1 >= AsUnderlyingType(ShopService::Rename) && action.Param1 <= AsUnderlyingType(ShopService::FactionChange);
+                    break;
+                case ShopAction::Profession:
+                    valid = sSkillLineStore.LookupEntry(action.Param1) != nullptr;
+                    if (action.Param2 <= 0)
+                        action.Param2 = 300;
+                    break;
+                case ShopAction::Level:
+                    valid = action.Param1 > 1 && action.Param1 <= STRONG_MAX_LEVEL;
+                    break;
+                case ShopAction::Title:
+                    valid = sCharTitlesStore.LookupEntry(action.Param1) != nullptr;
+                    break;
+                case ShopAction::Reputation:
+                    valid = sFactionStore.LookupEntry(action.Param1) != nullptr;
+                    break;
+                case ShopAction::RealmTransfer:
+                    break;
+                case ShopAction::BoostToken:
+                    if (action.Param1 <= 0)
+                        action.Param1 = 6;
+                    break;
+                default:
+                    valid = false;
+                    break;
+            }
+
+            if (!valid)
+            {
+                TC_LOG_ERROR("sql.sql", "Table `shop_product_action`: product {} has an invalid action {} ({}, {}), skipped.", productId, AsUnderlyingType(action.Action), action.Param1, action.Param2);
+                continue;
+            }
+
+            // items (mailed) and account-wide things can be bought at the character screen too
+            if (action.Action != ShopAction::Item && action.Action != ShopAction::RealmTransfer && action.Action != ShopAction::BoostToken)
+                product->InGameOnly = true;
+            product->Actions.push_back(action);
+        } while (result->NextRow());
+    }
+
+    TC_LOG_INFO("server.loading", ">> Loaded {} shop tabs and {} shop products in {} ms", _shopGroupStore.size(), _shopProductStore.size(), GetMSTimeDiffToNow(oldMSTime));
+}
+
+ShopProduct const* ObjectMgr::GetShopProduct(uint32 id) const
+{
+    return Trinity::Containers::MapGetValuePtr(_shopProductStore, id);
+}
+
 void ObjectMgr::LoadCreatureTemplateModels()
 {
     uint32 oldMSTime = getMSTime();
@@ -1186,6 +1321,14 @@ void ObjectMgr::CheckCreatureTemplate(CreatureTemplate const* cInfo)
     {
         TC_LOG_ERROR("sql.sql", "Creature (Entry: {}) has wrong value ({}) in speed_run, set to 1.14286.", cInfo->Entry, cInfo->speed_run);
         const_cast<CreatureTemplate*>(cInfo)->speed_run = 1.14286f;
+    }
+
+    // the scale is the ObjectScale of the creature and of its summons: 0 draws a zero-sized model (client assert) and zeroes its
+    // bounding radius and combat reach
+    if (!(cInfo->scale > 0.0f))
+    {
+        TC_LOG_ERROR("sql.sql", "Creature (Entry: {}) has wrong value ({}) in scale, set to 1.", cInfo->Entry, cInfo->scale);
+        const_cast<CreatureTemplate*>(cInfo)->scale = 1.0f;
     }
 
     if (cInfo->type && !sCreatureTypeStore.LookupEntry(cInfo->type))

@@ -652,7 +652,7 @@ namespace ClassicArathiBasin
 
     enum SpawnGroups : uint32
     {
-        SPAWN_GROUP_NODE_BASE       = 529000,               // + node * 10 + NodeStatus (banner + banner aura)
+        SPAWN_GROUP_NODE_BASE       = 529000,               // + node * 10 + NodeStatus (banner + banner aura; occupied: spirit guide and node NPCs, 2026_10_12_40)
         SPAWN_GROUP_CONTESTED_AURA  = 5,                    // + node * 10: neutral banner aura while contested
         SPAWN_GROUP_FARM_ALLIANCE   = 529050,               // farm decoration while the Alliance owns the farm
         SPAWN_GROUP_FARM_HORDE      = 529051,
@@ -743,13 +743,21 @@ struct battleground_classic_arathi_basin : BattlegroundScript
             UpdateWorldState(node.WidgetAlliance, 0);
             UpdateWorldState(node.WidgetHorde, 0);
         }
+
+        // manual spawn groups: a despawned group stays despawned
+        for (uint8 node = 0; node < NodesCount; ++node)
+            battlegroundMap->SpawnGroupSpawn(SPAWN_GROUP_NODE_BASE + node * 10 + NODE_NEUTRAL, true);
+        battlegroundMap->SpawnGroupSpawn(SPAWN_GROUP_GHOST_GATES, true);
     }
 
     void OnStart() override
     {
         for (ObjectGuid const& guid : _doors)
             if (GameObject* door = battlegroundMap->GetGameObject(guid))
+            {
                 door->UseDoorOrButton();
+                door->DespawnOrUnsummon(3s);
+            }
 
         battlegroundMap->SpawnGroupDespawn(ClassicArathiBasin::SPAWN_GROUP_GHOST_GATES);
     }

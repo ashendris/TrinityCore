@@ -195,6 +195,7 @@ void WorldSession::HandleMoveWorldportAck()
 
     // get the teleport destination
     TeleportLocation const& loc = player->GetTeleportDest();
+    uint32 const graveyardId = player->ConsumeGraveyardTeleportId();
 
     // possible errors in the coordinate validity check
     if (!MapManager::IsValidMapCoord(loc.Location))
@@ -227,15 +228,23 @@ void WorldSession::HandleMoveWorldportAck()
     // relocate the player to the teleport destination
     // the CannotEnter checks are done in TeleporTo but conditions may change
     // while the player is in transit, for example the map may get full
-    if (!newMap || newMap->CannotEnter(player))
+    TransferAbortParams const denied = newMap ? newMap->CannotEnter(player) : TransferAbortParams(TRANSFER_ABORT_ERROR);
+    if (!newMap || denied)
     {
-        TC_LOG_ERROR("network", "Map {} ({}) could not be created for player {} ({}), porting player to homebind", loc.Location.GetMapId(), newMap ? newMap->GetMapName() : "Unknown", player->GetGUID().ToString(), player->GetName());
+        TC_LOG_ERROR("network", "Map {} ({}) could not be created for player {} ({}), porting player to homebind (reason {} arg {})",
+            loc.Location.GetMapId(), newMap ? newMap->GetMapName() : "Unknown", player->GetGUID().ToString(), player->GetName(),
+            uint32(denied.Reason), uint32(denied.Arg));
         player->TeleportTo(player->m_homebind);
         return;
     }
 
-    float z = loc.Location.GetPositionZ() + player->GetHoverOffset();
-    player->Relocate(loc.Location.GetPositionX(), loc.Location.GetPositionY(), z, loc.Location.GetOrientation());
+    // Classic 1.60: a release to a graveyard on another map is checked for a buried Z here, once the map exists (Player::RepopAtGraveyard)
+    WorldLocation arrival = loc.Location;
+    if (graveyardId)
+        player->SnapBuriedLocToFloor(newMap, arrival, graveyardId);
+
+    float z = arrival.GetPositionZ() + player->GetHoverOffset();
+    player->Relocate(arrival.GetPositionX(), arrival.GetPositionY(), z, arrival.GetOrientation());
     player->SetFallInformation(0, player->GetPositionZ());
 
     player->ResetMap();
@@ -348,11 +357,13 @@ void WorldSession::HandleMoveWorldportAck()
             {
                 raidInstanceMessage.Locked = !playerLock->IsExpired();
                 raidInstanceMessage.Extended = playerLock->IsExtended();
+                raidInstanceMessage.TimeLeft = int32(std::max<int64>(std::chrono::duration_cast<Seconds>(playerLock->GetEffectiveExpiryTime() - GameTime::GetSystemTime()).count(), 0));
             }
             else
             {
                 raidInstanceMessage.Locked = false;
                 raidInstanceMessage.Extended = false;
+                raidInstanceMessage.TimeLeft = int32(std::max<int64>(std::chrono::duration_cast<Seconds>(InstanceLockMgr::GetNextResetTime(entries) - GameTime::GetSystemTime()).count(), 0));
             }
             SendPacket(raidInstanceMessage.Write());
         }
@@ -591,7 +602,19 @@ void WorldSession::HandleMovementOpcode(OpcodeClient opcode, MovementInfo& movem
 
         plrMover->UpdateFallInformationIfNeed(movementInfo, opcode);
 
-        if (movementInfo.pos.GetPositionZ() < plrMover->GetMap()->GetMinHeight(plrMover->GetPhaseShift(), movementInfo.pos.GetPositionX(), movementInfo.pos.GetPositionY()))
+        // Below the map's minimum height only counts when no geometry holds the player up: the .map files of WMO-only
+        // instances (Molten Core) carry a minimum plane above the floor, and a player standing on a valid WMO floor was killed
+        float const minHeight = plrMover->GetMap()->GetMinHeight(plrMover->GetPhaseShift(), movementInfo.pos.GetPositionX(), movementInfo.pos.GetPositionY());
+        bool underMap = movementInfo.pos.GetPositionZ() < minHeight;
+        if (underMap)
+        {
+            float const floor = plrMover->GetMap()->GetHeight(plrMover->GetPhaseShift(), movementInfo.pos.GetPositionX(), movementInfo.pos.GetPositionY(),
+                movementInfo.pos.GetPositionZ() + 2.0f, true, 10.0f);
+            if (floor > INVALID_HEIGHT && movementInfo.pos.GetPositionZ() >= floor - 2.0f)
+                underMap = false;
+        }
+
+        if (underMap)
         {
             if (!(plrMover->GetBattleground() && plrMover->GetBattleground()->HandlePlayerUnderMap(_player)))
             {

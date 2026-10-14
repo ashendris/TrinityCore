@@ -67,6 +67,7 @@
 #include "OutdoorPvP.h"
 #include "PartyPackets.h"
 #include "Pet.h"
+#include "PetFollowSpeed.h"
 #include "PetPackets.h"
 #include "PhasingHandler.h"
 #include "Player.h"
@@ -3090,6 +3091,18 @@ void Unit::_UpdateAutoRepeatSpell()
         return;
     }
 
+    // CheckCast below reads the explicit target pointer: resolve it again from its GUID, as Spell::update does,
+    // and stop when the target is gone (a stale pointer crashed in WorldObject::CanSeeOrDetect)
+    if (Spell* autoRepeatSpell = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]; autoRepeatSpell->getState() != SPELL_STATE_PREPARING)
+    {
+        ObjectGuid const targetGuid = autoRepeatSpell->m_targets.GetObjectTargetGUID();
+        if (!autoRepeatSpell->UpdatePointers() || (!targetGuid.IsEmpty() && !autoRepeatSpell->m_targets.GetObjectTarget()))
+        {
+            InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+            return;
+        }
+    }
+
     // castroutine
     if (isAttackReady(RANGED_ATTACK) && m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->getState() != SPELL_STATE_PREPARING)
     {
@@ -3620,8 +3633,12 @@ void Unit::_ApplyAuraEffect(Aura* aura, uint8 effIndex)
     ASSERT(aurApp);
     if (!aurApp->GetEffectMask())
         _ApplyAura(aurApp, 1 << effIndex);
-    else
+    else if (!aurApp->HasEffect(effIndex))
         aurApp->_HandleEffect(effIndex, true);
+    else
+        // the caller's HasEffect check went stale: a handler of an earlier target re-entered the spell system and applied it
+        TC_LOG_ERROR("spells", "Unit::_ApplyAuraEffect: aura {} effect {} on {} was already applied (re-entry), effectMask 0x{:X}",
+            aura->GetId(), uint32(effIndex), GetGUID().ToString(), aurApp->GetEffectMask());
 }
 
 // handles effects of aura application
@@ -3665,7 +3682,13 @@ void Unit::_ApplyAura(AuraApplication* aurApp, uint32 effMask)
     {
         if (effMask & 1 << aurEff->GetEffIndex())
         {
-            aurApp->_HandleEffect(aurEff->GetEffIndex(), true);
+            // a handler above (linked cast, aura state cast, no-stack removal, an earlier effect) can re-enter the spell
+            // system and apply this effect through a nested hit of the same application; applying it twice doubles it
+            if (!aurApp->HasEffect(aurEff->GetEffIndex()))
+                aurApp->_HandleEffect(aurEff->GetEffIndex(), true);
+            else
+                TC_LOG_ERROR("spells", "Unit::_ApplyAura: aura {} effect {} on {} was already applied (re-entry), effectMask 0x{:X}",
+                    aura->GetId(), uint32(aurEff->GetEffIndex()), GetGUID().ToString(), aurApp->GetEffectMask());
             if (aurApp->GetRemoveMode())
                 break;
         }
@@ -6916,10 +6939,13 @@ void Unit::SendEnergizeSpellLog(Unit* victim, uint32 spellID, int32 damage, int3
 
 void Unit::EnergizeBySpell(Unit* victim, SpellInfo const* spellInfo, int32 damage, Powers powerType)
 {
-    if (Player* player = victim->ToPlayer())
-        if (PowerTypeEntry const* powerTypeEntry = sDB2Manager.GetPowerTypeEntry(powerType))
-            if (powerTypeEntry->GetFlags().HasFlag(PowerTypeFlags::UseRegenInterrupt))
-                player->InterruptPowerRegen(powerType);
+    // Classic 1.60 (vanilla): only paying mana starts the five second rule (Spell::TakePower); receiving it does not (Judgement of
+    // Wisdom, Spiritual Attunement, Life Tap...), or a gain every few seconds would keep the window open. Other powers keep the retail rule.
+    if (powerType != POWER_MANA)
+        if (Player* player = victim->ToPlayer())
+            if (PowerTypeEntry const* powerTypeEntry = sDB2Manager.GetPowerTypeEntry(powerType))
+                if (powerTypeEntry->GetFlags().HasFlag(PowerTypeFlags::UseRegenInterrupt))
+                    player->InterruptPowerRegen(powerType);
 
     int32 gain = victim->ModifyPower(powerType, damage, false);
     int32 overEnergize = damage - gain;
@@ -7361,14 +7387,8 @@ float Unit::SpellCritChanceTaken(Unit const* caster, Spell* spell, AuraEffect co
                         break;
                 }
 
-                // Spell crit suppression
-                if (GetTypeId() == TYPEID_UNIT)
-                {
-                    // Classic 1.60: only higher level targets lower the chance; a level 60 on a level 3 mob gained +57% crit
-                    int32 const levelDiff = static_cast<int32>(GetLevelForTarget(caster)) - caster->GetLevel();
-                    if (levelDiff > 0)
-                        crit_chance -= levelDiff * 1.0f;
-                }
+                // Classic 1.60: no spell crit suppression by target level (vanilla GetSpellCritChance has none); level only
+                // matters through the spell hit table
             }
             break;
         }
@@ -9045,6 +9065,7 @@ void Unit::UpdateSpeed(UnitMoveType mtype)
             break;
     }
 
+    bool petCatchUp = false;
     if (Creature* creature = ToCreature())
     {
         if (creature->HasUnitTypeMask(UNIT_MASK_MINION) && !creature->IsInCombat())
@@ -9058,6 +9079,7 @@ void Unit::UpdateSpeed(UnitMoveType mtype)
                     if (speed < ownerSpeed || creature->IsWithinDist3d(followed, 10.0f))
                         speed = ownerSpeed;
                     speed *= std::min(std::max(1.0f, 0.75f + (GetDistance(followed) - PET_FOLLOW_DIST) * 0.05f), 1.3f);
+                    petCatchUp = true;
                 }
             }
         }
@@ -9078,6 +9100,10 @@ void Unit::UpdateSpeed(UnitMoveType mtype)
         if (speed < min_speed)
             speed = min_speed;
     }
+
+    // the catch-up scale drifts with every step, a packet for each drift floods the nearby clients
+    if (petCatchUp && !PetCatchUpSpeedWorthSending(m_speed_rate[mtype], speed))
+        return;
 
     SetSpeedRate(mtype, speed);
 }
@@ -10271,6 +10297,10 @@ void Unit::SetPower(Powers power, int32 val, bool withPowerUpdate /*= true*/)
     if (power == POWER_COMBO_POINTS && IsPlayer() && oldPower != val)
         withPowerUpdate = true;
 
+    // no points left, no combo target (finishers, resets, logout)
+    if (power == POWER_COMBO_POINTS && !val && !GetClassicComboTarget().IsEmpty())
+        SetClassicComboTarget(ObjectGuid::Empty);
+
     if (IsInWorld() && withPowerUpdate)
     {
         WorldPackets::Combat::PowerUpdate packet;
@@ -11463,6 +11493,8 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
     if (attacker && !attacker->IsInMap(victim))
         attacker = nullptr;
 
+    sScriptMgr->OnUnitDeath(victim, attacker);
+
     // find player: owner of controlled `this` or `this` itself maybe
     Player* player = nullptr;
     if (attacker)
@@ -11531,7 +11563,45 @@ void Unit::SetMeleeAnimKitId(uint16 animKitId)
             if (InstanceScript const* instance = creature->GetInstanceScript())
                 dungeonEncounter = instance->GetBossDungeonEncounter(creature);
 
-            if (creature->GetMap()->IsDungeon())
+            if (dungeonEncounter && !tappers.empty() && sWorld->getBoolConfig(CONFIG_LOOT_SHARED_ENCOUNTER_LOOT))
+            {
+                // vanilla boss loot: the whole loot table on one corpse, looted under the group's loot method
+                Group* group = nullptr;
+                Player* looter = tappers[0];
+                for (Player* tapper : tappers)
+                {
+                    if (Group* tapperGroup = tapper->GetGroup())
+                    {
+                        group = tapperGroup;
+                        looter = tapper;
+                        break;
+                    }
+                }
+
+                if (group)
+                    if (Player* groupLooter = ObjectAccessor::GetPlayer(*creature, group->GetLooterGuid()))
+                        looter = groupLooter;
+
+                Loot* loot = new Loot(creature->GetMap(), creature->GetGUID(), LOOT_CORPSE, group);
+                loot->SetDungeonEncounterId(dungeonEncounter->ID);
+
+                if (uint32 lootid = creature->GetLootId())
+                    loot->FillLoot(lootid, LootTemplates_Creature, looter, !group, false, creature->GetLootMode(), ItemBonusMgr::GetContextForPlayer(creature->GetMap()->GetMapDifficulty(), looter));
+
+                if (creature->GetLootMode() > 0)
+                    loot->generateMoneyLoot(creature->GetCreatureDifficulty()->GoldMin, creature->GetCreatureDifficulty()->GoldMax);
+
+                if (group)
+                    loot->NotifyLootList(creature->GetMap());
+
+                creature->m_personalLoot.clear();   // GetLootForPlayer only reads m_loot while there is no personal loot
+                creature->m_loot.reset(loot);
+
+                // Update round robin looter only if the creature had loot
+                if (group && !loot->isLooted())
+                    group->UpdateLooterGuid(creature);
+            }
+            else if (creature->GetMap()->IsDungeon())
             {
                 if (dungeonEncounter)
                 {
@@ -12716,7 +12786,8 @@ float Unit::MeleeSpellMissChance(Unit const* victim, WeaponAttackType attType, S
     else
         missChance -= victim->GetTotalAuraModifier(SPELL_AURA_MOD_ATTACKER_MELEE_HIT_CHANCE);
 
-    return std::max(missChance, 0.f);
+    // Classic 1.60 (vanilla, VMaNGOS): the miss chance is limited to 0..60%
+    return std::clamp(missChance, 0.f, 60.f);
 }
 
 void Unit::OnPhaseChange()
